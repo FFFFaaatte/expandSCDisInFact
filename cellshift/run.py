@@ -71,7 +71,7 @@ def metrics(pred, target, source_mean, bandwidth, seed):
 
 
 def synthetic(seed):
-    """Tiny plumbing fixture, not evidence about biological performance."""
+    """Synthetic integration-test fixture; excluded from scientific evaluation."""
     rng = np.random.default_rng(seed)
     frames, blocks = [], []
     for batch in ['0','1']:
