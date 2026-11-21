@@ -8,7 +8,6 @@ import urllib.request
 
 FILES = {
     'gbm': ('GBM_treatment.tar.gz', '8786d99f36a011cfde06b0ccabbf3690'),
-    'simulated': ('simulated.tar.gz', 'd74594539ac139b65c3b2aa729a42b86'),
 }
 
 def download(url, path, md5=None):
@@ -59,7 +58,7 @@ def extract(archive, destination):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('dataset', choices=['gbm', 'simulated', 'all', 'demo'])
+    parser.add_argument('dataset', choices=['gbm', 'all', 'demo'])
     parser.add_argument('--root', default='data')
     args = parser.parse_args()
     root = Path(args.root)

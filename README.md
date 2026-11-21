@@ -1,141 +1,95 @@
 # Cell-dependent shifts for scDisInFact
 
-An experimental extension of scDisInFact that replaces its fixed latent shift with a network predicting the **full shift for each cell**. The pretrained encoders and decoder remain frozen while the shift network is trained.
+Based on [the scDisInFact paper (Nature Communications, 2024)](https://doi.org/10.1038/s41467-024-45227-w) and its [original implementation](https://github.com/ZhangLabGT/scDisInFact).
 
-The upstream implementation is pinned to a specific revision. Full scientific experiments have not yet been completed; successful smoke tests and short demo runs do not establish an improvement over the original method.
+In this project, we ask a small question: **can a shift that depends on the cell improve drug-response predictions compared with the original mean shift?** We test this on the paper’s glioblastoma (GBM) data. This is a limited, single-seed experiment, not a reproduction of every experiment in the paper.
 
-## GBM experiment notebook
+## What the original method does
 
-[notebooks/GBM_experiment.ipynb](notebooks/GBM_experiment.ipynb) implements the GBM sample-holdout experiment, including dataset composition, partitioning, backbone estimation, adapter optimization, and paired evaluation. Tables, optimization diagnostics, and prediction comparisons are rendered inline.
+Single-cell RNA data describe how much RNA was measured for each gene in each cell. Here, cells come from different patients and were measured either with the drug **panobinostat** or with **DMSO**, the control without the drug. Patient differences are treated as batch effects.
 
-The notebook records each experiment under a separate directory in `runs_notebook`. The final section exposes the extended multi-seed benchmark through `RUN_EXTENDED`. CUDA is the default training target; CPU execution requires `ALLOW_CPU=True`.
+scDisInFact uses an encoder to learn a shared representation of each cell and another encoder to learn treatment-related information. A decoder combines these representations with the batch label to reconstruct gene expression. Reconstruction, KL, MMD, classification, and group-lasso losses guide what the representations capture.
 
-## Environment
+To predict treatment response, the original method calculates the difference between the mean treatment representations of drug and control cells. It adds this **same shift** to each input cell’s treatment representation, then decodes the result. The decoder can already produce different expression changes for different cells; the shift itself is shared.
 
-Use Python 3.10–3.12 in a dedicated environment. Install a CUDA-compatible PyTorch build for the GPU machine before installing the remaining requirements. The requirements accept an already installed compatible PyTorch version.
+## Our idea
+
+We replace the mean shift with a small network that predicts a shift for each cell. It takes:
+
+- the cell’s shared latent representation;
+- its current treatment representation;
+- the source and target treatment labels.
+
+The network has two 64-unit hidden layers with ReLU. Its output is added to the treatment representation. It predicts the full shift; we do not add the original mean shift on top.
+
+We first train scDisInFact, then freeze its encoders and decoder. We train only our shift network, while gradients pass through the frozen decoder. We use MMD to compare predicted expression with denoised target training cells from the **same patient and cell type**, after library-size normalization and `log1p`. Cell-type labels group the loss but are not network inputs.
+
+## Experiment
+
+We follow the paper’s GBM prediction task: hold out the treated sample **`PW034-705`** and predict it from control cells in two patients:
+
+| Input → target patient | What changes? |
+|---|---|
+| PW034 → PW034 | Treatment only |
+| PW030 → PW034 | Treatment and patient batch |
+
+Both routes use the same held-out target sample. We evaluate Myeloid, Oligodendrocytes, and tumor cells separately.
+
+We add a validation split of about 20% within each remaining patient × cell-type × treatment group. The paper’s GBM script does not reserve a separate validation set and fits its scaler before separating the test sample. We fit the scaler on training cells only and **retrain the original model on our split**, so the two methods share the same backbone and training data.
+
+The backbone uses the authors’ GBM settings: latent dimensions `[8, 2]`, negative-binomial reconstruction, batch size 64, learning rate `5e-4`, and 100 epochs. Our network uses Adam with learning rate `1e-3`, 50 updates per epoch, and up to 100 epochs. We select the lowest-validation-MMD checkpoint and stop after 10 epochs without improvement. This run used **seed 0**; the network’s selected checkpoint was epoch 8.
+
+## Results
+
+Both methods are compared with the **same denoised test reference**, reconstructed by the frozen backbone. Following the paper, we normalize each cell’s expression to sum to 100 and compare mean gene expression within each cell type.
+
+We report SSE, Pearson correlation, and R². The original GBM code calls its sum of squared errors “MSE”; our `paper_sse` column keeps that calculation explicit. The figures compare **our rerun of the original method** with our network, not with the paper’s published numbers.
+
+| Route | Cell type | Original SSE | Our SSE | SSE reduction |
+|---|---|---:|---:|---:|
+| Same patient | Myeloid | 0.615898 | 0.236499 | **61.60%** |
+| Same patient | Oligodendrocytes | 0.228535 | 0.156363 | **31.58%** |
+| Same patient | tumor | 0.421067 | 0.427316 | −1.48% |
+| Different patient | Myeloid | 0.423591 | 0.382145 | **9.78%** |
+| Different patient | Oligodendrocytes | 0.059382 | 0.053476 | **9.94%** |
+| Different patient | tumor | 0.584523 | 0.500640 | **14.35%** |
+
+![SSE reduction for each prediction route and cell type](docs/figures/sse_improvement.png)
+
+The network improves all three metrics in **five of six comparisons**. For tumor cells in the same patient, all three metrics are slightly worse. These results describe one held-out sample and one seed, using a model-derived denoised reference. They do not establish robust improvements across datasets or correct responses for individual cells.
+
+![SSE comparison](docs/figures/paper_sse.png)
+![Pearson correlation comparison](docs/figures/pearson.png)
+![R-squared comparison](docs/figures/r2.png)
+
+The [result table](results/gbm_metrics.csv) includes the exact scores and source/target cell counts. The [notebook](notebooks/GBM_experiment.ipynb) shows the data, training, and evaluation outputs.
+
+### Residual-shift check
+
+We also tried learning a correction on top of the original mean shift, starting with a zero correction. It reduced SSE in all six comparisons with the original method, but outperformed our direct shift network in only two. Its best validation MMD was also higher (0.0136 versus 0.0052). One possible explanation is that the different initialization led to a less effective optimization path under the same training settings; this has not been established as the cause. The residual comparison is included at the end of the notebook.
+
+## Run the experiment
+
+Use Python 3.12. The requirements list the package versions used in our run. We used PyTorch 2.7.1 with CUDA 12.6 on an RTX 3060; install the appropriate CUDA build of PyTorch for the target machine before installing the requirements.
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
 python -m pip install -r requirements.txt
-python -c 'import torch; print(torch.__version__, torch.cuda.is_available())'
-python -m unittest discover -s tests -v
+python -m cellshift.download gbm
 ```
 
-Run all commands from the repository root. Downloaded datasets and generated checkpoint directories are ignored by Git.
+Open [notebooks/GBM_experiment.ipynb](notebooks/GBM_experiment.ipynb) with the installed Python environment. `RESUME_DIRECTORY=None` starts a new run. Set it to a saved run directory to reuse compatible checkpoints and scores. The final results cell can also read saved scores without retraining.
 
-## Download and inspect data
-
-For a short check using the authors' demo:
-
-```bash
-python -m cellshift.download demo
-python -m cellshift.run --experiment demo --device cuda --base-epochs 2 --adapter-epochs 2 --steps 2 --min-cells 2 --output runs_demo
-```
-
-Download the full GBM and simulated datasets and inspect split feasibility:
-
-```bash
-python -m cellshift.download all
-python -m cellshift.inspect --dataset gbm
-python -m cellshift.inspect --dataset simulated
-```
-
-To download GBM alone, use `python -m cellshift.download gbm`.
-
-The compressed GBM and simulated archives total approximately 1.35 GB. Archives are stored under `data/archives` and extracted under `data`. Interrupted downloads use `.part` files and support resumption; completed archives are checked against the MD5 checksums published on Zenodo. Allow enough disk space for both archives and extracted files.
-
-Upstream preprocessing materializes several dense copies of the count matrix. Check the inspection output and available host RAM before training. Demo and synthetic smoke-test outputs are excluded from scientific reports.
-
-## Run experiments
-
-Start with GBM seed zero to assess runtime and memory requirements:
+For command-line execution:
 
 ```bash
 python -m cellshift.run --experiment gbm --seed 0 --device cuda
-```
-
-Run the full suite, skipping previously completed runs:
-
-```bash
-bash scripts/run_suite.sh
-```
-
-Or select individual experiments:
-
-```bash
-python -m cellshift.run --experiment gbm_celltype --seed 0 --device cuda
-python -m cellshift.run --experiment sim_is --seed 0 --device cuda
-python -m cellshift.run --experiment sim_oos --seed 0 --device cuda
 python -m cellshift.report
 ```
 
-The suite defaults to seeds 0, 1, and 2. Use `SEEDS="0" bash scripts/run_suite.sh` to evaluate seed zero only. Set `PYTHON`, `DATA_ROOT`, and `OUTPUT` to select the interpreter, input directory, and output directory.
+Data come from the authors’ [Zenodo archive](https://zenodo.org/records/10472715); the compressed GBM download is about 452 MB. The original preprocessing creates large dense matrices, so sufficient system RAM is needed. Data and checkpoints are excluded from Git; the notebook, exported result table, and figures are included. Regenerate the README figures with `python scripts/plot_results.py`.
 
-Incomplete runs are not overwritten: use a new `--output` directory to retry. Resuming training within an epoch is not implemented.
+## Source and license
 
-For an integration smoke test without downloaded data or a GPU:
+The upstream model is retained under `vendor/scDisInFact`, pinned to [revision `9466ecf`](https://github.com/ZhangLabGT/scDisInFact/tree/9466ecf257d923f879cb39712c530d24826d88bc). The original model implementation is unchanged. Our shift network, experiment code, and evaluation utilities are in `cellshift/` (November 2026).
 
-```bash
-python -m cellshift.run --experiment smoke --device cpu --base-epochs 1 --adapter-epochs 2 --steps 2 --min-cells 2 --output runs_smoke
-```
-
-## Experimental protocol
-
-| Experiment | Training and evaluation |
-|---|---|
-| `gbm` | Hold out sample `PW034-705`; predict panobinostat response from PW034 and PW030 control cells. |
-| `gbm_celltype` | Hold out all treated Myeloid cells across patients; evaluate predictions from control cells in the same patient. |
-| `sim_is` | Use setting `2conds_base_10000_500_0.4_100_8`; approximately 60% training, 20% validation, and 20% test within sufficiently large groups. |
-| `sim_oos` | Hold out `ctrl + severe` in both batches; reserve 20% of remaining groups for validation. |
-
-Each underlying simulated cell is assigned to exactly one condition combination, following the upstream prediction-script design. Corresponding versions of a cell cannot leak between splits. Both simulation experiments evaluate six prediction routes: changing the first factor, the second factor, or both, with or without a batch change. Only one of the paper's nine simulation settings is used.
-
-Validation cells are excluded from backbone training. The scaler and latent centroids are fitted using training cells only. Splits and any replacement holdout cell type are recorded before training. If Myeloid lacks sufficient cells, select the eligible cell type with the largest minimum control/treated population, excluding `Other`.
-
-Evaluation requires at least 50 source and target cells per cell type for GBM, and 10 for simulation because its test groups are smaller. Unsupported groups are recorded; an experiment with no valid evaluation scenarios fails explicitly.
-
-### Backbone
-
-Use latent dimensions `[8, 2]` for GBM and `[8, 2, 2]` for simulation, the upstream loss defaults, negative-binomial reconstruction, batch size 64, and learning rate `5e-4`. Train for 100 epochs on GBM and 50 on simulation. The upstream loop includes both zero and `nepochs`, so the runner subtracts one to obtain the intended number of epochs.
-
-### Compared methods
-
-All four methods share the same trained backbone and data split:
-
-- `no_shift`: decode without changing biological factors; still apply the destination batch.
-- `fixed`: apply the original difference between training-set latent centroids.
-- `constant`: learn a cell-independent shift for each transition.
-- `network`: predict the full shift using an MLP with two 64-unit ReLU hidden layers, taking the shared representation, the current factor-specific representation, and one-hot source and target labels. The original fixed shift is not added to its output.
-
-Each condition factor has its own network. Unchanged factors remain exactly unchanged. When changing both factors, compute their shifts simultaneously from the original representations. Cell-type labels group the training loss but are not network inputs.
-
-Training transitions change one factor within the same batch and cell type. Held-out condition combinations and held-out treated cell types never supply training targets.
-
-### Adapter training
-
-Train with multi-bandwidth MMD on library-size-normalized expression with a per-cell sum of 100, followed by `log1p`. Training targets are frozen-backbone reconstructions of permitted target training cells.
-
-The base kernel bandwidth is the median squared distance among at most 512 training cells; bandwidth scales are 0.25, 0.5, 1, 2, and 4. Use Adam with learning rate `1e-3`, at most 100 epochs, and 50 steps per epoch. Sample transitions uniformly, with at most 128 cells per side. Select the checkpoint using validation MMD with patience 10.
-
-Gradients pass through the decoder to the adapter, but the backbone weights remain frozen and are checked after training.
-
-## Outputs and interpretation
-
-Each command-line run records the split, group counts, configuration and upstream revision, scaler and backbone checkpoint, adapter checkpoints, loss histories, skipped scenarios, timing, and `metrics.csv`. Checkpoints use `torch.save`. Latent representations are cached during execution; full predicted count matrices are not saved.
-
-The aggregate report includes `REPORT.md`, `summary.csv`, `paired_comparisons.csv`, and `comparison.png`. Comparisons are paired by seed, scenario, and cell type before calculating improvements.
-
-The primary reference is the **same observed target expression for every method**. Scores against a shared frozen-backbone denoised reference are reported separately. Metrics include MSE, Pearson correlation, R², correlation of expression changes relative to control, and test MMD. Squared error in expression changes against a common control is mathematically identical to expression MSE and is not presented as independent evidence.
-
-The `paper_sse` column stores the sum of squared errors, which the upstream GBM script labels MSE. Use `mse` for the actual mean squared error. Corrected splitting and software-version differences mean the results need not exactly match every published number. The goal is a controlled comparison of the original and proposed shifts, not a complete reproduction of the paper. scGen and scPreGAN are not retrained.
-
-The simulated data do not necessarily require cell-dependent responses; a lack of improvement is also informative. Matching cell-type means or distributions does not establish accurate causal responses for individual cells. Three seeds provide preliminary descriptive evidence, not extensive statistical validation.
-
-## Sources and license
-
-- [Original paper, Nature Communications 2024](https://doi.org/10.1038/s41467-024-45227-w)
-- [Official datasets and checksums](https://zenodo.org/records/10472715)
-- [Pinned upstream source, revision 9466ecf](https://github.com/ZhangLabGT/scDisInFact/tree/9466ecf257d923f879cb39712c530d24826d88bc)
-
-`vendor/scDisInFact` contains the required upstream files and two reference experiment scripts, without changes to the model implementation. The authors' GPL-3.0 license and README are retained. This project uses the same license.
+The original authors’ notices and GPL-3.0 license are preserved. This project uses the same [license](LICENSE).

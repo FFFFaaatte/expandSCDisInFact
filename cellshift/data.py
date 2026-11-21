@@ -55,28 +55,6 @@ def load_gbm(root):
     genes = np.atleast_1d(np.loadtxt(folder / 'genes.txt', dtype=str))
     return validate(Data(counts, meta, ['treatment'], genes))
 
-def load_simulated(root, seed, setting='2conds_base_10000_500_0.4_100_8'):
-    folders = [p for p in Path(root).rglob(setting) if p.is_dir()]
-    if len(folders) != 1:
-        raise ValueError('Expected exactly one simulation setting %s; found %s' % (setting, folders))
-    folder = folders[0]
-    rng = np.random.default_rng(seed)
-    blocks, frames = [], []
-    conditions = [('ctrl', 'healthy'), ('ctrl', 'severe'), ('stim', 'healthy'), ('stim', 'severe')]
-    for batch in range(2):
-        labels = pd.read_csv(folder / ('cell_label%d.txt' % (batch + 1)), sep='\t', index_col=0).values.squeeze()
-        # One condition per underlying simulated cell, exactly as the prediction scripts.
-        chunks = np.array_split(rng.permutation(len(labels)), 4)
-        for (treatment, severity), indices in zip(conditions, chunks):
-            matrix = pd.read_csv(folder / ('GxC%d_%s_%s.txt' % (batch + 1, treatment, severity)), sep='\t', header=None).values.T
-            if len(matrix) != len(labels):
-                raise ValueError('Simulation cell labels do not match counts')
-            blocks.append(sp.csr_matrix(matrix[indices], dtype=np.float32))
-            frames.append(pd.DataFrame({'batch': str(batch), 'treatment': treatment, 'severity': severity,
-                'cell_type': labels[indices].astype(str), 'base_id': ['b%d-c%d' % (batch, i) for i in indices]},
-                index=['b%d-c%d' % (batch, i) for i in indices]))
-    return validate(Data(sp.vstack(blocks).tocsr(), pd.concat(frames), ['treatment', 'severity'], np.array(['gene_%d' % i for i in range(blocks[0].shape[1])])) )
-
 def split(data, experiment, seed, min_cells=50):
     m = data.meta.copy()
     role = pd.Series('train', index=m.index)
@@ -86,17 +64,7 @@ def split(data, experiment, seed, min_cells=50):
         if not test.any():
             raise ValueError('Missing official GBM held-out sample PW034-705')
         role.loc[test] = 'test'
-    elif experiment == 'gbm_celltype':
-        table = pd.crosstab(m.cell_type, m.treatment)
-        candidates = table.loc[table.min(axis=1) >= min_cells].index.tolist()
-        candidates = [c for c in candidates if c != 'Other']
-        if not candidates:
-            raise ValueError('No cell type has sufficient control and treatment cells')
-        held_type = 'Myeloid' if 'Myeloid' in candidates else table.loc[candidates].min(axis=1).idxmax()
-        role.loc[m.cell_type.eq(held_type) & m.treatment.eq('0.2 uM panobinostat')] = 'test'
-    elif experiment == 'sim_oos':
-        role.loc[m.treatment.eq('ctrl') & m.severity.eq('severe')] = 'test'
-    elif experiment != 'sim_is':
+    elif experiment != 'demo':
         raise ValueError(experiment)
     rng = np.random.default_rng(seed)
     keys = ['batch', 'cell_type'] + data.conditions
@@ -106,12 +74,12 @@ def split(data, experiment, seed, min_cells=50):
             continue
         n = max(1, int(len(ids) * .2))
         role.loc[ids[:n]] = 'val'
-        if experiment == 'sim_is':
+        if experiment == 'demo':
             role.loc[ids[n:2*n]] = 'test'
     if not role.eq('test').any() or not role.eq('val').any():
         raise ValueError('Empty validation or test split')
     if 'base_id' in m and m.base_id.duplicated().any():
-        raise ValueError('Repeated underlying simulated cell')
+        raise ValueError('Repeated underlying cell identifier')
     m['role'] = role
     return m, held_type
 

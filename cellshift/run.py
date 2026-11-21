@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import torch
 from sklearn.metrics import r2_score
-from .data import Data, dense, normalized, load_gbm, load_simulated, load_demo, split
+from .data import Data, dense, normalized, load_gbm, load_demo, split
 from .model import Backbone, bandwidth_from_training, mmd, train_adapter
 from .upstream import REVISION, create_scdisinfact_dataset, scdisinfact
 
@@ -31,19 +31,16 @@ def scenarios(data, manifest, experiment, held_type, min_cells):
         for patient in ['PW034','PW030']:
             source = m.batch.eq(patient) & m.treatment.eq('vehicle (DMSO)') & ~m.role.eq('test')
             scenarios.append(('patient_'+patient, source, target, ['0.2 uM panobinostat'],'PW034'))
-    elif experiment == 'gbm_celltype':
-        for patient in sorted(m.loc[m.role.eq('test'),'batch'].unique()):
-            target = m.role.eq('test') & m.batch.eq(patient)
-            source = m.cell_type.eq(held_type) & m.batch.eq(patient) & m.treatment.eq('vehicle (DMSO)')
-            scenarios.append(('held_'+held_type+'_'+patient,source,target,['0.2 uM panobinostat'],patient))
-    else:
+    elif experiment == 'demo':
         target = m.role.eq('test') & m.treatment.eq('ctrl') & m.severity.eq('severe') & m.batch.eq('0')
         for batch in ['0','1']:
             for treatment,severity in [('stim','severe'),('ctrl','healthy'),('stim','healthy')]:
                 source = m.batch.eq(batch) & m.treatment.eq(treatment) & m.severity.eq(severity)
-                if experiment == 'sim_is':
+                if experiment == 'demo':
                     source &= m.role.eq('test')
                 scenarios.append(('%s_%s_b%s' % (treatment,severity,batch),source,target,['ctrl','severe'],'0'))
+    else:
+        raise ValueError(experiment)
     valid, skipped = [], []
     for name,source,target,conditions,batch in scenarios:
         source_types = m.loc[source].cell_type.value_counts()
@@ -94,7 +91,7 @@ def synthetic(seed):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--experiment',choices=['gbm','gbm_celltype','sim_is','sim_oos','smoke','demo'],required=True)
+    p.add_argument('--experiment',choices=['gbm','smoke','demo'],required=True)
     p.add_argument('--data-root',default='data')
     p.add_argument('--output',default='runs')
     p.add_argument('--seed',type=int,default=0)
@@ -102,11 +99,11 @@ def main():
     p.add_argument('--base-epochs',type=int)
     p.add_argument('--adapter-epochs',type=int,default=100)
     p.add_argument('--steps',type=int,default=50)
-    p.add_argument('--min-cells',type=int,help='Default: 50 GBM, 10 simulation/demo')
+    p.add_argument('--min-cells',type=int,help='Minimum cells per source/target group; default: 1 (presence only)')
     p.add_argument('--threads',type=int,default=4)
     args = p.parse_args()
-    if (args.base_epochs is not None and args.base_epochs < 1) or args.adapter_epochs < 1 or args.steps < 1 or args.threads < 1 or (args.min_cells is not None and args.min_cells < 2):
-        p.error('Epochs, steps and threads must be positive; min-cells must be at least 2')
+    if (args.base_epochs is not None and args.base_epochs < 1) or args.adapter_epochs < 1 or args.steps < 1 or args.threads < 1 or (args.min_cells is not None and args.min_cells < 1):
+        p.error('Epochs, steps and threads must be positive; min-cells must be at least 1')
     torch.set_num_threads(args.threads)
     torch.manual_seed(args.seed); np.random.seed(args.seed); random.seed(args.seed)
     if args.device.startswith('cuda') and not torch.cuda.is_available():
@@ -117,17 +114,17 @@ def main():
         raise FileExistsError('Use a new output directory; existing run will not be overwritten: '+str(out))
     started = time.monotonic()
     is_smoke = args.experiment=='smoke'
-    experiment = 'sim_is' if args.experiment in ['smoke','demo'] else args.experiment
+    experiment = 'demo' if args.experiment in ['smoke','demo'] else args.experiment
     if args.min_cells is None:
-        args.min_cells = 50 if experiment.startswith('gbm') else 10
-    data = synthetic(args.seed) if is_smoke else load_demo(args.data_root) if args.experiment=='demo' else (load_gbm(args.data_root) if experiment.startswith('gbm') else load_simulated(args.data_root,args.seed))
+        args.min_cells = 1
+    data = synthetic(args.seed) if is_smoke else load_demo(args.data_root) if args.experiment=='demo' else (load_gbm(args.data_root) if experiment.startswith('gbm') else load_demo(args.data_root))
     manifest, held_type = split(data,experiment,args.seed,args.min_cells)
     manifest.to_csv(out/'split.csv')
     pd.Series(data.genes).to_csv(out/'genes.csv',index=False,header=False)
     config = vars(args).copy()
     config.update({'upstream_revision':REVISION,'python':platform.python_version(),'torch':torch.__version__,
         'numpy':np.__version__,'pandas':pd.__version__,'scipy':scipy.__version__,'sklearn':sklearn.__version__,
-        'gpu':torch.cuda.get_device_name(torch.device(args.device)) if args.device.startswith('cuda') else None,'held_cell_type':held_type,'smoke_only':is_smoke,'demonstration_only':args.experiment in ['smoke','demo'],'shape':data.counts.shape,
+        'gpu':torch.cuda.get_device_name(torch.device(args.device)) if args.device.startswith('cuda') else None,'smoke_only':is_smoke,'demonstration_only':args.experiment in ['smoke','demo'],'shape':data.counts.shape,
         'base_hyperparameters':{'dims':[8]+[2]*len(data.conditions),'batch_size':64,'lr':5e-4,'likelihood':'NB',
             'mmd_shared':1e-4,'mmd_unshared':1e-4,'kl_shared':1e-5,'kl_unshared':1e-2,'classification':1,'group_lasso':1},
         'adapter_hyperparameters':{'hidden':[64,64],'lr':1e-3,'patience':10,'max_group_cells':128,'kernel_scales':[.25,.5,1,2,4]},
@@ -162,7 +159,7 @@ def main():
     base_seconds = time.monotonic()-before
     bandwidth = bandwidth_from_training(np.log1p(normalized(training.counts)),args.seed)
     adapters = {}
-    for mode in ['constant','network']:
+    for mode in ['network']:
         adapter, history = train_adapter(backbone,train_encoded,val_encoded,training.meta,validation.meta,dims,mode,bandwidth,args.seed,
             epochs=args.adapter_epochs,steps=args.steps)
         adapters[mode] = adapter
@@ -176,10 +173,9 @@ def main():
         source,target = subset(data,source_mask),subset(data,target_mask)
         source_encoded = backbone.encode(source.counts,source.meta)
         target_encoded = backbone.encode(target.counts,target.meta)
-        references = {'raw':normalized(target.counts),'denoised':backbone.predict(target_encoded,mode='identity')}
+        references = {'denoised':backbone.predict(target_encoded,mode='identity')}
         ids = [names.index(value) for names,value in zip(backbone.labels,labels)]
-        predictions = {'no_shift':backbone.predict(source_encoded,ids,batch,mode='identity'),
-                       'fixed':backbone.predict(source_encoded,ids,batch)}
+        predictions = {'fixed':backbone.predict(source_encoded,ids,batch)}
         predictions.update({mode:backbone.predict(source_encoded,ids,batch,adapter) for mode,adapter in adapters.items()})
         for method,prediction in predictions.items():
             if not np.isfinite(prediction).all():

@@ -4,8 +4,8 @@ set -euo pipefail
 PYTHON="${PYTHON:-python}"
 DATA_ROOT="${DATA_ROOT:-data}"
 OUTPUT="${OUTPUT:-runs}"
-for seed in ${SEEDS:-0 1 2}; do
-  for experiment in gbm gbm_celltype sim_is sim_oos; do
+for seed in 0; do
+  for experiment in gbm; do
     if [[ -f "$OUTPUT/$experiment/seed_$seed/timing.json" && -f "$OUTPUT/$experiment/seed_$seed/metrics.csv" ]]; then
       continue
     fi
