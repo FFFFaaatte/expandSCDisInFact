@@ -64,10 +64,6 @@ The network improves all three metrics in **five of six comparisons**. For tumor
 
 The [result table](results/gbm_metrics.csv) includes the exact scores and source/target cell counts. The [notebook](notebooks/GBM_experiment.ipynb) shows the data, training, and evaluation outputs.
 
-### Residual-shift check
-
-We also tried learning a correction on top of the original mean shift, starting with a zero correction. It reduced SSE in all six comparisons with the original method, but outperformed our direct shift network in only two. Its best validation MMD was also higher (0.0136 versus 0.0052). One possible explanation is that the different initialization led to a less effective optimization path under the same training settings; this has not been established as the cause. The residual comparison is included at the end of the notebook.
-
 ## Run the experiment
 
 Use Python 3.12. The requirements list the package versions used in our run. We used PyTorch 2.7.1 with CUDA 12.6 on an RTX 3060; install the appropriate CUDA build of PyTorch for the target machine before installing the requirements.

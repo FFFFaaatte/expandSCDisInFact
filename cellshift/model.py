@@ -24,29 +24,6 @@ class Shift(nn.Module):
             result.append(z + delta * (s != t).float()[:,None])
         return result
 
-class ResidualShift(Shift):
-    """Learn a zero-initialized correction to fixed training-set centroid shifts."""
-    def __init__(self, dims, categories, centroids):
-        super().__init__(dims, categories, mode='network')
-        if len(centroids) != len(categories):
-            raise ValueError('One centroid matrix is required per condition factor.')
-        for j, (means, n, d, branch) in enumerate(zip(centroids, categories, dims[1:], self.branches)):
-            if tuple(means.shape) != (n, d):
-                raise ValueError('Centroid dimensions do not match the condition factor.')
-            self.register_buffer(f'centroid_{j}', means.detach().clone())
-            nn.init.zeros_(branch[-1].weight)
-            nn.init.zeros_(branch[-1].bias)
-
-    def forward(self, shared, unshared, source, target):
-        corrected = super().forward(shared, unshared, source, target)
-        result = []
-        for j, (z, corrected_z) in enumerate(zip(unshared, corrected)):
-            means = getattr(self, f'centroid_{j}')
-            fixed_z = z + means[target[:, j]] - means[source[:, j]]
-            result.append(fixed_z + (corrected_z - z))
-        return result
-
-
 def mmd(x, y, bandwidth):
     # Biased MMD: stable for small groups and no assumption of paired cells.
     def kernel(a,b):
@@ -139,12 +116,7 @@ def transitions(meta, conditions, min_cells=2):
 
 def train_adapter(backbone, train, val, train_meta, val_meta, dims, mode, bandwidth, seed, epochs=100, steps=50):
     torch.manual_seed(seed)
-    if mode == 'residual':
-        if backbone.centroids is None:
-            raise ValueError('Training-set centroids must be fitted before residual training.')
-        adapter = ResidualShift(dims, [len(x) for x in backbone.labels], backbone.centroids).to(backbone.device)
-    else:
-        adapter = Shift(dims,[len(x) for x in backbone.labels],mode).to(backbone.device)
+    adapter = Shift(dims,[len(x) for x in backbone.labels],mode).to(backbone.device)
     for p in backbone.model.parameters():
         p.requires_grad_(False)
     original = {k:v.detach().cpu().clone() for k,v in backbone.model.state_dict().items()}
